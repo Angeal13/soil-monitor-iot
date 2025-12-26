@@ -6,7 +6,7 @@ class Config:
     DB_CONFIG = {
         'user': "DevOps",
         'password': "DevTeam", 
-        'host': "192.168.1.242",
+        'host': "192.168.1.100",
         'port': 3306,
         'database': "soilmonitornig"
     }
@@ -16,10 +16,11 @@ class Config:
     SERIAL_BAUDRATE = 9600
     SERIAL_TIMEOUT = 1
     MODBUS_COMMAND = bytes([0x01, 0x03, 0x00, 0x00, 0x00, 0x07, 0x04, 0x08])
-    RESPONSE_LENGTH = 21
+    RESPONSE_LENGTH = 19
     
     # System Behavior
     MEASUREMENT_INTERVAL = 300  # seconds
     OFFLINE_STORAGE = 'offline_data.csv'
     MAX_OFFLINE_RECORDS = 1000
+
     INTERNET_TEST_URLS = ['http://www.google.com', 'http://www.cloudflare.com']
