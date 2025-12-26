@@ -19,7 +19,40 @@ VENV_NAME="soilenv"
 VENV_PATH="${HOME_DIR}/${VENV_NAME}"
 APP_PATH="${HOME_DIR}/${REPO_NAME}"
 SERVICE_NAME="soil-monitor.service"
-PYTHON_VERSION="python3.9"
+
+# Detect Python version
+detect_python() {
+    print_status "Detecting Python version..."
+    
+    # Check for python3 command
+    if command -v python3 &> /dev/null; then
+        PYTHON_VERSION="python3"
+        PYTHON_CMD="python3"
+        
+        # Get full version
+        PYTHON_FULL_VERSION=$(python3 --version | awk '{print $2}')
+        print_status "Found Python $PYTHON_FULL_VERSION"
+        
+        # Check if it's Python 3.x
+        if [[ ! "$PYTHON_FULL_VERSION" =~ ^3\. ]]; then
+            print_error "Python 3.x is required. Found: $PYTHON_FULL_VERSION"
+            exit 1
+        fi
+        
+        # Check Python version compatibility
+        PYTHON_MAJOR_MINOR=$(echo "$PYTHON_FULL_VERSION" | cut -d. -f1-2)
+        
+        # Warn about very old Python 3 versions
+        if [[ "$(echo "$PYTHON_MAJOR_MINOR < 3.7" | bc -l 2>/dev/null)" -eq 1 ]]; then
+            print_warning "Python $PYTHON_FULL_VERSION is quite old. Consider upgrading to Python 3.7+"
+        fi
+        
+    else
+        print_error "Python 3 not found!"
+        print_error "Please install Python 3: sudo apt install python3"
+        exit 1
+    fi
+}
 
 print_status() {
     echo -e "${GREEN}[*]${NC} $1"
@@ -51,20 +84,6 @@ update_system() {
     sudo apt-get install -y git python3-pip python3-venv python3-dev
 }
 
-install_python_version() {
-    print_status "Checking Python version..."
-    
-    # Check if Python 3.9 is available
-    if ! command -v python3.9 &> /dev/null; then
-        print_warning "Python 3.9 not found, installing..."
-        sudo apt-get install -y python3.9 python3.9-venv python3.9-dev
-    fi
-    
-    # Set as default Python 3 version
-    sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
-    sudo update-alternatives --set python3 /usr/bin/python3.9
-}
-
 setup_serial() {
     print_status "Setting up serial communication..."
     
@@ -89,8 +108,8 @@ create_virtualenv() {
         rm -rf "$VENV_PATH"
     fi
     
-    # Create new virtual environment with Python 3.9
-    $PYTHON_VERSION -m venv "$VENV_PATH"
+    # Create new virtual environment with detected Python version
+    $PYTHON_CMD -m venv "$VENV_PATH"
     
     # Activate and install dependencies
     source "${VENV_PATH}/bin/activate"
@@ -99,10 +118,29 @@ create_virtualenv() {
     pip install --upgrade pip
     
     print_status "Installing Python dependencies..."
-    pip install mysql-connector-python==8.0.33
-    pip install pyserial==3.5
-    pip install pandas==1.5.3
-    pip install urllib3==1.26.15
+    
+    # Install compatible versions based on Python version
+    if [[ "$(echo "$PYTHON_MAJOR_MINOR >= 3.11" | bc -l 2>/dev/null)" -eq 1 ]] || [[ -z "$PYTHON_MAJOR_MINOR" ]]; then
+        # For Python 3.11+ or unknown version, use latest compatible versions
+        print_status "Python $PYTHON_FULL_VERSION detected, using latest compatible packages"
+        pip install mysql-connector-python pyserial pandas urllib3
+    elif [[ "$(echo "$PYTHON_MAJOR_MINOR >= 3.8" | bc -l 2>/dev/null)" -eq 1 ]]; then
+        # For Python 3.8-3.10, use specific versions that work well
+        pip install mysql-connector-python==8.2.0
+        pip install pyserial==3.5
+        pip install pandas==2.0.3
+        pip install urllib3==2.0.7
+    else
+        # For Python 3.7 or older, use older compatible versions
+        pip install mysql-connector-python==8.0.33
+        pip install pyserial==3.5
+        pip install pandas==1.5.3
+        pip install urllib3==1.26.15
+    fi
+    
+    # Verify installations
+    print_status "Verifying package installations..."
+    pip list | grep -E "mysql-connector|pyserial|pandas|urllib3"
     
     deactivate
     
@@ -123,21 +161,20 @@ clone_repository() {
     fi
     
     # Verify required files exist
-    if [[ ! -f "Config.py" ]]; then
-        print_error "Config.py not found in repository!"
-        print_error "Please ensure your repository has the correct files."
-        exit 1
-    fi
-    
-    if [[ ! -f "MainController.py" ]]; then
-        print_error "MainController.py not found in repository!"
-        print_error "Please ensure your repository has the correct files."
-        exit 1
-    fi
+    REQUIRED_FILES=("Config.py" "MainController.py" "SensorReader.py" "OnlineLogger.py" "OfflineLogger.py")
+    for file in "${REQUIRED_FILES[@]}"; do
+        if [[ ! -f "$file" ]]; then
+            print_error "$file not found in repository!"
+            print_error "Please ensure your repository has the correct files."
+            exit 1
+        fi
+    done
     
     # Set proper permissions
     chmod +x setup.sh 2>/dev/null || true
     find . -name "*.py" -exec chmod +x {} \; 2>/dev/null || true
+    
+    print_status "All required files found ✓"
 }
 
 update_serial_port() {
@@ -291,6 +328,12 @@ verify_configuration() {
     print_status "Repository: ${APP_PATH}"
     print_status "Virtual Env: ${VENV_PATH}"
     print_status "Service: ${SERVICE_NAME}"
+    print_status "Python Version: ${PYTHON_FULL_VERSION}"
+    
+    # Test Python in virtual environment
+    source "${VENV_PATH}/bin/activate"
+    print_status "Virtual Env Python: $(python3 --version)"
+    deactivate
     
     # Show database configuration (without passwords)
     if [[ -f "${APP_PATH}/Config.py" ]]; then
@@ -307,6 +350,50 @@ verify_configuration() {
     echo ""
 }
 
+test_system() {
+    print_status "Running system test..."
+    
+    # Test Python imports
+    source "${VENV_PATH}/bin/activate"
+    
+    TEST_SCRIPT="${HOME_DIR}/test_imports.py"
+    cat > "$TEST_SCRIPT" << 'EOF'
+#!/usr/bin/env python3
+import sys
+print(f"Python {sys.version}")
+
+try:
+    import mysql.connector
+    print("✓ mysql.connector imported successfully")
+except ImportError as e:
+    print(f"✗ mysql.connector failed: {e}")
+
+try:
+    import serial
+    print("✓ pyserial imported successfully")
+except ImportError as e:
+    print(f"✗ pyserial failed: {e}")
+
+try:
+    import pandas
+    print(f"✓ pandas {pandas.__version__} imported successfully")
+except ImportError as e:
+    print(f"✗ pandas failed: {e}")
+
+try:
+    import urllib3
+    print(f"✓ urllib3 {urllib3.__version__} imported successfully")
+except ImportError as e:
+    print(f"✗ urllib3 failed: {e}")
+
+print("\nAll required packages are installed!")
+EOF
+    
+    python3 "$TEST_SCRIPT"
+    rm "$TEST_SCRIPT"
+    deactivate
+}
+
 setup_complete() {
     echo ""
     echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
@@ -316,6 +403,10 @@ setup_complete() {
     
     verify_configuration
     
+    # Run system test
+    test_system
+    
+    echo ""
     echo "Service commands:"
     echo "  Start:    sudo systemctl start soil-monitor"
     echo "  Stop:     sudo systemctl stop soil-monitor"
@@ -368,12 +459,15 @@ main() {
     echo ""
     print_status "Detected user: ${CURRENT_USER}"
     print_status "Home directory: ${HOME_DIR}"
+    
+    # Detect Python version first
+    detect_python
+    
     echo ""
     
     # Run all setup steps
     check_sudo
     update_system
-    install_python_version
     setup_serial
     create_virtualenv
     clone_repository
