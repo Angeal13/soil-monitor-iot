@@ -10,13 +10,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Configuration
-USER="pi"
+# Configuration - Dynamically determined
+CURRENT_USER=$(whoami)
+HOME_DIR=$(eval echo ~$CURRENT_USER)
 REPO_NAME="soil-monitor-iot"
 REPO_URL="https://github.com/Angeal13/${REPO_NAME}.git"
 VENV_NAME="soilenv"
-VENV_PATH="/home/${USER}/${VENV_NAME}"
-APP_PATH="/home/${USER}/${REPO_NAME}"
+VENV_PATH="${HOME_DIR}/${VENV_NAME}"
+APP_PATH="${HOME_DIR}/${REPO_NAME}"
 SERVICE_NAME="soil-monitor.service"
 PYTHON_VERSION="python3.9"
 
@@ -32,13 +33,15 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-check_user() {
-    if [[ $(whoami) != "pi" ]]; then
-        print_error "This script must be run as user 'pi'"
-        print_error "Current user: $(whoami)"
+check_sudo() {
+    print_status "Checking sudo privileges..."
+    if ! sudo -v; then
+        print_error "User $CURRENT_USER needs sudo privileges"
+        print_error "Run: sudo usermod -a -G sudo $CURRENT_USER"
+        print_error "Then log out and back in"
         exit 1
     fi
-    print_status "Running as user 'pi' ✓"
+    print_status "User $CURRENT_USER has sudo privileges ✓"
 }
 
 update_system() {
@@ -65,8 +68,8 @@ install_python_version() {
 setup_serial() {
     print_status "Setting up serial communication..."
     
-    # Add user to dialout group for serial access
-    sudo usermod -a -G dialout $USER
+    # Add current user to dialout group for serial access
+    sudo usermod -a -G dialout $CURRENT_USER
     
     # Disable serial console if using GPIO serial
     print_warning "If using GPIO serial (ttyAMA0), disable serial console in raspi-config"
@@ -179,30 +182,31 @@ update_serial_port() {
 create_start_script() {
     print_status "Creating start script..."
     
-    cat > "${APP_PATH}/start_monitor.sh" << 'EOF'
+    cat > "${APP_PATH}/start_monitor.sh" << EOF
 #!/bin/bash
 # start_monitor.sh - Start Soil Monitor IoT System
 
 set -e
 
-USER="pi"
-VENV_PATH="/home/${USER}/soilenv"
-APP_PATH="/home/${USER}/soil-monitor-iot"
-LOG_FILE="/home/${USER}/soil_monitor.log"
+USER="${CURRENT_USER}"
+HOME_DIR="${HOME_DIR}"
+VENV_PATH="\${HOME_DIR}/soilenv"
+APP_PATH="\${HOME_DIR}/soil-monitor-iot"
+LOG_FILE="\${HOME_DIR}/soil_monitor.log"
 
-echo "$(date): Starting Soil Monitor System" >> "$LOG_FILE"
+echo "\$(date): Starting Soil Monitor System" >> "\$LOG_FILE"
 
 # Activate virtual environment
-source "${VENV_PATH}/bin/activate"
+source "\${VENV_PATH}/bin/activate"
 
 # Change to app directory
-cd "$APP_PATH"
+cd "\$APP_PATH"
 
 # Run the main controller
-python3 MainController.py 2>&1 | tee -a "$LOG_FILE"
+python3 MainController.py 2>&1 | tee -a "\$LOG_FILE"
 
 # If we get here, something went wrong
-echo "$(date): Soil Monitor stopped unexpectedly" >> "$LOG_FILE"
+echo "\$(date): Soil Monitor stopped unexpectedly" >> "\$LOG_FILE"
 EOF
     
     chmod +x "${APP_PATH}/start_monitor.sh"
@@ -222,9 +226,9 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/soil-monitor-iot
-ExecStart=/home/pi/soil-monitor-iot/start_monitor.sh
+User=${CURRENT_USER}
+WorkingDirectory=${HOME_DIR}/soil-monitor-iot
+ExecStart=${HOME_DIR}/soil-monitor-iot/start_monitor.sh
 Restart=always
 RestartSec=10
 StandardOutput=syslog
@@ -234,7 +238,7 @@ SyslogIdentifier=soil-monitor
 # Security enhancements
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/home/pi/soil-monitor-iot /home/pi/soilenv
+ReadWritePaths=${HOME_DIR}/soil-monitor-iot ${HOME_DIR}/soilenv
 PrivateTmp=true
 
 [Install]
@@ -245,21 +249,21 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable ${SERVICE_NAME}
     
-    print_status "Systemd service created and enabled"
+    print_status "Systemd service created and enabled for user: ${CURRENT_USER}"
 }
 
 create_log_rotation() {
     print_status "Setting up log rotation..."
     
     sudo bash -c "cat > /etc/logrotate.d/soil-monitor" << EOF
-/home/pi/soil_monitor.log {
+${HOME_DIR}/soil_monitor.log {
     daily
     missingok
     rotate 7
     compress
     delaycompress
     notifempty
-    create 644 pi pi
+    create 644 ${CURRENT_USER} ${CURRENT_USER}
     postrotate
         systemctl kill -s USR1 soil-monitor.service >/dev/null 2>&1 || true
     endscript
@@ -274,7 +278,7 @@ install_crontab() {
     (crontab -l 2>/dev/null | grep -v "soil-monitor"; echo "*/5 * * * * /usr/bin/systemctl is-active --quiet soil-monitor.service || /usr/bin/systemctl restart soil-monitor.service") | crontab -
     
     # Also add a daily log cleanup
-    (crontab -l 2>/dev/null | grep -v "cleanup_old_logs"; echo "0 2 * * * find /home/pi -name 'soil_monitor.log.*' -mtime +30 -delete") | crontab -
+    (crontab -l 2>/dev/null | grep -v "cleanup_old_logs"; echo "0 2 * * * find ${HOME_DIR} -name 'soil_monitor.log.*' -mtime +30 -delete") | crontab -
 }
 
 verify_configuration() {
@@ -282,6 +286,8 @@ verify_configuration() {
     
     echo ""
     print_status "=== Configuration Summary ==="
+    print_status "Current User: ${CURRENT_USER}"
+    print_status "Home Directory: ${HOME_DIR}"
     print_status "Repository: ${APP_PATH}"
     print_status "Virtual Env: ${VENV_PATH}"
     print_status "Service: ${SERVICE_NAME}"
@@ -316,10 +322,17 @@ setup_complete() {
     echo "  Status:   sudo systemctl status soil-monitor"
     echo "  Logs:     journalctl -u soil-monitor -f"
     echo ""
-    echo "Important:"
-    echo "1. Verify database settings in: ${APP_PATH}/Config.py"
-    echo "2. Check serial port: ls /dev/ttyUSB* or /dev/ttyAMA0"
-    echo "3. For GPIO serial: sudo raspi-config → Serial Port"
+    echo "Important notes:"
+    echo "1. User ${CURRENT_USER} was added to 'dialout' group for serial access"
+    echo "   You may need to log out and back in for this to take effect"
+    echo "2. Verify database settings in: ${APP_PATH}/Config.py"
+    echo "3. Check serial port: ls /dev/ttyUSB* or /dev/ttyAMA0"
+    echo "4. For GPIO serial: sudo raspi-config → Serial Port"
+    echo ""
+    echo "Paths:"
+    echo "  Code:     ${APP_PATH}"
+    echo "  Virtual:  ${VENV_PATH}"
+    echo "  Logs:     ${HOME_DIR}/soil_monitor.log"
     echo ""
     
     # Ask user if they want to reboot now
@@ -342,6 +355,7 @@ setup_complete() {
         echo "  sudo systemctl start soil-monitor"
         echo "  sudo systemctl enable soil-monitor"
         echo ""
+        echo -e "${YELLOW}Important: Log out and back in for serial permissions to take effect${NC}"
         echo -e "${GREEN}Setup complete! You can reboot later with: sudo reboot${NC}"
     fi
 }
@@ -352,9 +366,12 @@ main() {
     echo -e "${GREEN}   IoT Soil Monitor System Setup for Raspberry Pi   ${NC}"
     echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
     echo ""
+    print_status "Detected user: ${CURRENT_USER}"
+    print_status "Home directory: ${HOME_DIR}"
+    echo ""
     
     # Run all setup steps
-    check_user
+    check_sudo
     update_system
     install_python_version
     setup_serial
